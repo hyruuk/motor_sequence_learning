@@ -3,18 +3,21 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "berlot2020-task"
-version = "0.1.0"
-description = "PsychoPy implementation of the Berlot et al. (2020) discrete sequence production (DSP) task."
+name = "smb-msl"
+version = "0.2.0"
+description = "Motor sequence learning tasks: Berlot DSP task and SMB Scene Sequence Learning (SSL) task."
 readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "MIT"}
 dependencies = [
     "psychopy>=2024.1.0",
+    "stable-retro>=0.9.2",
+    "numpy>=1.24",
 ]
 
 [project.scripts]
 berlot2020-task = "berlot2020_task.__main__:main"
+smb-ssl-task = "smb_ssl_task.__main__:main"
 
 [tool.setuptools.packages.find]
-include = ["berlot2020_task*"]
+include = ["berlot2020_task*", "smb_ssl_task*"]

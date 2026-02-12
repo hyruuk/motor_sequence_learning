@@ -25,7 +25,10 @@ data/
 .DS_Store
 Thumbs.db
 
+# Local settings (ROM path, etc.)
+.smb_ssl_settings.json
+
 # Misc
 TODO.md
 MSL-implementation.md
-
+SMB-MSL-brainstorm.md
