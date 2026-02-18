@@ -27,9 +27,16 @@ from smb_ssl_task.config import (
     COUNTDOWN_STEP_DURATION,
     GAMEPLAY_BAR_Y_BASE,
     GAMEPLAY_BAR_FONT_SIZE,
+    SPEED_FACTOR,
 )
 from smb_ssl_task.config import verbose
-from smb_ssl_task.scenes import get_scenes, get_canonical_sequence, get_canonical_sequence_source, get_clip_savestate_path
+from smb_ssl_task.scenes import (
+    get_scenes,
+    get_canonical_sequence,
+    get_canonical_sequence_from_bk2,
+    get_canonical_sequence_source,
+    get_clip_savestate_path,
+)
 from smb_ssl_task.msp import ActionSequenceDisplay, collect_msp_execution
 from smb_ssl_task.game import (
     execute_gameplay_trial,
@@ -103,9 +110,18 @@ def _compute_points_gameplay(exec2_data, time_threshold):
         return POINTS_ERROR
 
 
+def _show_try_again(win, duration=1.5):
+    """Show a brief 'Try again' message between repeat attempts."""
+    from psychopy import visual as _vis
+    msg = _vis.TextStim(win, text="Try again...", height=40, color=(1, 1, 0))
+    msg.draw()
+    win.flip()
+    core.wait(duration)
+
+
 def run_training_session(win, input_handler, participant_id, group,
                          session_number, n_blocks, mode="gameplay",
-                         engine=None):
+                         engine=None, advanced_config=None):
     """Run a complete training session.
 
     Parameters
@@ -120,9 +136,20 @@ def run_training_session(win, input_handler, participant_id, group,
         "msp" or "gameplay"
     engine : GameEngine or None
         Required if mode="gameplay".
+    advanced_config : AdvancedConfig or None
+        If enabled, overrides scene selection and/or enables repeat mode.
     """
     trained_scenes, _ = get_scenes(group)
     scene_ids = sorted(trained_scenes.keys())
+
+    # --- Advanced mode: override scene list ---
+    if advanced_config and advanced_config.enabled and advanced_config.selected_scene_id:
+        sid = advanced_config.selected_scene_id
+        if advanced_config.selected_scene_info:
+            trained_scenes = {sid: advanced_config.selected_scene_info}
+        elif sid in trained_scenes:
+            trained_scenes = {sid: trained_scenes[sid]}
+        scene_ids = [sid]
 
     logger = DataLogger(participant_id, group, "training", session_number)
 
@@ -172,176 +199,225 @@ def run_training_session(win, input_handler, participant_id, group,
             block_mts = []
             block_points = 0
 
+            # Advanced mode logging helpers
+            _adv = advanced_config and advanced_config.enabled
+            _adv_bk2 = (advanced_config.selected_bk2
+                         if advanced_config else None)
+            _repeat = (advanced_config.repeat_until_passed
+                        if advanced_config else False)
+
             for scene_id in trial_list:
                 trial_counter += 1
                 scene_info = trained_scenes[scene_id]
+                repeat_attempt = 0
+                passed = False
 
-                if mode == "msp":
-                    action_seq = get_canonical_sequence(scene_id)
-                    target_symbols = [s for s, _ in action_seq]
-                    source_clip = get_canonical_sequence_source(scene_id)
-                    if verbose():
-                        print(f"[MSP] Scene: {scene_id} | BK2: {source_clip or 'placeholder'} | Sequence: {' '.join(target_symbols)}")
+                while not passed:
+                    repeat_attempt += 1
 
-                    # --- Execution 1: visible ---
-                    exec1 = collect_msp_execution(
-                        win, input_handler, seq_display,
-                        action_seq, visible=True,
-                    )
-                    if exec1 is None:
-                        return
+                    # Show "Try again" between repeat attempts
+                    if repeat_attempt > 1:
+                        _show_try_again(win)
 
-                    logger.log_execution(
-                        block_number=block_num,
-                        trial_number=trial_counter,
-                        scene_id=scene_id,
-                        mode=mode,
-                        execution_number=1,
-                        target_sequence=target_symbols,
-                        response_sequence=exec1["response_sequence"],
-                        target_durations=exec1["target_durations"],
-                        response_durations=exec1["response_durations"],
-                        accuracy_per_element=exec1["accuracy_per_element"],
-                        accuracy_trial=exec1["accuracy_trial"],
-                        movement_time=exec1["movement_time"],
-                        inter_element_intervals=exec1["inter_element_intervals"],
-                    )
+                    if mode == "msp":
+                        # --- Sequence selection (advanced override) ---
+                        if _adv_bk2 and repeat_attempt == 1:
+                            action_seq = get_canonical_sequence_from_bk2(_adv_bk2)
+                        elif repeat_attempt == 1:
+                            action_seq = get_canonical_sequence(scene_id)
+                        # reuse action_seq on subsequent attempts
+                        target_symbols = [s for s, _ in action_seq]
+                        source_clip = get_canonical_sequence_source(scene_id)
+                        if verbose():
+                            print(f"[MSP] Scene: {scene_id} | BK2: {source_clip or 'placeholder'} | Sequence: {' '.join(target_symbols)} | Attempt: {repeat_attempt}")
 
-                    win.flip()
-                    core.wait(INTER_EXECUTION_INTERVAL)
+                        # --- Execution 1: visible ---
+                        exec1 = collect_msp_execution(
+                            win, input_handler, seq_display,
+                            action_seq, visible=True,
+                        )
+                        if exec1 is None:
+                            return
 
-                    # --- Execution 2: hidden (memory) ---
-                    exec2 = collect_msp_execution(
-                        win, input_handler, seq_display,
-                        action_seq, visible=False,
-                    )
-                    if exec2 is None:
-                        return
+                        logger.log_execution(
+                            block_number=block_num,
+                            trial_number=trial_counter,
+                            scene_id=scene_id,
+                            mode=mode,
+                            execution_number=1,
+                            target_sequence=target_symbols,
+                            response_sequence=exec1["response_sequence"],
+                            target_durations=exec1["target_durations"],
+                            response_durations=exec1["response_durations"],
+                            accuracy_per_element=exec1["accuracy_per_element"],
+                            accuracy_trial=exec1["accuracy_trial"],
+                            movement_time=exec1["movement_time"],
+                            inter_element_intervals=exec1["inter_element_intervals"],
+                            advanced_mode=_adv,
+                            source_bk2=_adv_bk2,
+                            repeat_attempt=repeat_attempt,
+                        )
 
-                    points = _compute_points_msp(exec2, mt_threshold)
-                    block_points += points
+                        win.flip()
+                        core.wait(INTER_EXECUTION_INTERVAL)
 
-                    logger.log_execution(
-                        block_number=block_num,
-                        trial_number=trial_counter,
-                        scene_id=scene_id,
-                        mode=mode,
-                        execution_number=2,
-                        target_sequence=target_symbols,
-                        response_sequence=exec2["response_sequence"],
-                        target_durations=exec2["target_durations"],
-                        response_durations=exec2["response_durations"],
-                        accuracy_per_element=exec2["accuracy_per_element"],
-                        accuracy_trial=exec2["accuracy_trial"],
-                        movement_time=exec2["movement_time"],
-                        inter_element_intervals=exec2["inter_element_intervals"],
-                        points_awarded=points,
-                    )
+                        # --- Execution 2: hidden (memory) ---
+                        exec2 = collect_msp_execution(
+                            win, input_handler, seq_display,
+                            action_seq, visible=False,
+                        )
+                        if exec2 is None:
+                            return
 
-                    # Track block stats
-                    if exec2["accuracy_trial"] == 0:
-                        block_errors += 1
-                    if exec2["movement_time"] is not None and exec2["accuracy_trial"] == 1:
-                        block_mts.append(exec2["movement_time"])
+                        points = _compute_points_msp(exec2, mt_threshold)
+                        block_points += points
 
-                else:  # gameplay mode
-                    # Select a BK2 clip and load the matching savestate
-                    action_seq = get_canonical_sequence(scene_id)
-                    source_clip = get_canonical_sequence_source(scene_id)
-                    clip_state = get_clip_savestate_path(scene_id)
-                    target_symbols = [s for s, _ in action_seq]
-                    if verbose():
-                        print(f"[GAMEPLAY] Scene: {scene_id} | BK2: {source_clip or 'placeholder'} | Seq: {' '.join(target_symbols)}")
+                        logger.log_execution(
+                            block_number=block_num,
+                            trial_number=trial_counter,
+                            scene_id=scene_id,
+                            mode=mode,
+                            execution_number=2,
+                            target_sequence=target_symbols,
+                            response_sequence=exec2["response_sequence"],
+                            target_durations=exec2["target_durations"],
+                            response_durations=exec2["response_durations"],
+                            accuracy_per_element=exec2["accuracy_per_element"],
+                            accuracy_trial=exec2["accuracy_trial"],
+                            movement_time=exec2["movement_time"],
+                            inter_element_intervals=exec2["inter_element_intervals"],
+                            points_awarded=points,
+                            advanced_mode=_adv,
+                            source_bk2=_adv_bk2,
+                            repeat_attempt=repeat_attempt,
+                        )
 
-                    # --- Fixation ---
-                    if show_fixation_rest(win, FIXATION_DURATION,
-                                          input_handler=input_handler):
-                        return
+                        # Track block stats
+                        if exec2["accuracy_trial"] == 0:
+                            block_errors += 1
+                        if exec2["movement_time"] is not None and exec2["accuracy_trial"] == 1:
+                            block_mts.append(exec2["movement_time"])
 
-                    # --- BK2 Preview Replay ---
-                    engine.load_scene(scene_id, scene_info, state_path=clip_state)
-                    preview_result = replay_bk2_preview(
-                        win, input_handler, engine, seq_display, action_seq,
-                    )
-                    if preview_result is None:
-                        return
-                    preview_exit_x = preview_result["exit_x"]
+                        # Check pass criterion for repeat mode
+                        passed = exec2["accuracy_trial"] == 1
 
-                    # --- Countdown (overlaid on frozen game frame) ---
-                    def _draw_game_and_bar():
-                        engine.render()
-                        seq_display.draw()
-                    if show_countdown(
-                        win,
-                        steps=COUNTDOWN_STEPS,
-                        step_duration=COUNTDOWN_STEP_DURATION,
-                        draw_extras=_draw_game_and_bar,
-                        input_handler=input_handler,
-                    ):
-                        return
+                    else:  # gameplay mode
+                        # --- Sequence selection (advanced override) ---
+                        if _adv_bk2 and repeat_attempt == 1:
+                            action_seq = get_canonical_sequence_from_bk2(_adv_bk2)
+                        elif repeat_attempt == 1:
+                            action_seq = get_canonical_sequence(scene_id)
+                        source_clip = get_canonical_sequence_source(scene_id)
+                        clip_state = get_clip_savestate_path(scene_id)
+                        target_symbols = [s for s, _ in action_seq]
+                        if verbose():
+                            print(f"[GAMEPLAY] Scene: {scene_id} | BK2: {source_clip or 'placeholder'} | Seq: {' '.join(target_symbols)} | Attempt: {repeat_attempt}")
 
-                    # --- Execution 1: player plays with tracking ---
-                    engine.load_scene(scene_id, scene_info, state_path=clip_state)
-                    exec1 = execute_gameplay_with_tracking(
-                        win, input_handler, engine, seq_display,
-                        action_seq, preview_exit_x,
-                    )
-                    if exec1 is None:
-                        return
+                        # --- Fixation ---
+                        if show_fixation_rest(win, FIXATION_DURATION,
+                                              input_handler=input_handler):
+                            return
 
-                    logger.log_execution(
-                        block_number=block_num,
-                        trial_number=trial_counter,
-                        scene_id=scene_id,
-                        mode=mode,
-                        execution_number=1,
-                        outcome=exec1["outcome"],
-                        traversal_time=exec1["traversal_time"],
-                        distance_reached=exec1["distance_reached"],
-                        target_sequence=exec1["target_sequence"],
-                        response_sequence=exec1["response_sequence"],
-                        accuracy_per_element=exec1["accuracy_per_element"],
-                        accuracy_trial=exec1["accuracy_trial"],
-                    )
+                        # --- BK2 Preview Replay ---
+                        engine.load_scene(scene_id, scene_info, state_path=clip_state)
+                        preview_result = replay_bk2_preview(
+                            win, input_handler, engine, seq_display, action_seq,
+                            speed_factor=SPEED_FACTOR,
+                        )
+                        if preview_result is None:
+                            return
+                        preview_exit_x = preview_result["exit_x"]
 
-                    # --- Inter-execution pause (escape-aware) ---
-                    if _wait_with_escape(win, input_handler,
-                                         INTER_EXECUTION_INTERVAL):
-                        return
+                        # --- Countdown (overlaid on frozen game frame) ---
+                        def _draw_game_and_bar():
+                            engine.render()
+                            seq_display.draw()
+                        if show_countdown(
+                            win,
+                            steps=COUNTDOWN_STEPS,
+                            step_duration=COUNTDOWN_STEP_DURATION,
+                            draw_extras=_draw_game_and_bar,
+                            input_handler=input_handler,
+                        ):
+                            return
 
-                    # --- Execution 2: player plays from memory ---
-                    engine.load_scene(scene_id, scene_info, state_path=clip_state)
-                    exec2 = execute_gameplay_with_tracking(
-                        win, input_handler, engine, seq_display,
-                        action_seq, preview_exit_x,
-                    )
-                    if exec2 is None:
-                        return
+                        # --- Execution 1: player plays with tracking ---
+                        engine.load_scene(scene_id, scene_info, state_path=clip_state)
+                        exec1 = execute_gameplay_with_tracking(
+                            win, input_handler, engine, seq_display,
+                            action_seq, preview_exit_x,
+                            speed_factor=SPEED_FACTOR,
+                        )
+                        if exec1 is None:
+                            return
 
-                    points = _compute_points_gameplay(exec2, mt_threshold)
-                    block_points += points
+                        logger.log_execution(
+                            block_number=block_num,
+                            trial_number=trial_counter,
+                            scene_id=scene_id,
+                            mode=mode,
+                            execution_number=1,
+                            outcome=exec1["outcome"],
+                            traversal_time=exec1["traversal_time"],
+                            distance_reached=exec1["distance_reached"],
+                            target_sequence=exec1["target_sequence"],
+                            response_sequence=exec1["response_sequence"],
+                            accuracy_per_element=exec1["accuracy_per_element"],
+                            accuracy_trial=exec1["accuracy_trial"],
+                            advanced_mode=_adv,
+                            source_bk2=_adv_bk2,
+                            repeat_attempt=repeat_attempt,
+                        )
 
-                    logger.log_execution(
-                        block_number=block_num,
-                        trial_number=trial_counter,
-                        scene_id=scene_id,
-                        mode=mode,
-                        execution_number=2,
-                        outcome=exec2["outcome"],
-                        traversal_time=exec2["traversal_time"],
-                        distance_reached=exec2["distance_reached"],
-                        target_sequence=exec2["target_sequence"],
-                        response_sequence=exec2["response_sequence"],
-                        accuracy_per_element=exec2["accuracy_per_element"],
-                        accuracy_trial=exec2["accuracy_trial"],
-                        points_awarded=points,
-                    )
+                        # --- Inter-execution pause (escape-aware) ---
+                        if _wait_with_escape(win, input_handler,
+                                             INTER_EXECUTION_INTERVAL):
+                            return
 
-                    # Track block stats
-                    if exec2["outcome"] != "completed":
-                        block_errors += 1
-                    if exec2["outcome"] == "completed":
-                        block_mts.append(exec2["traversal_time"])
+                        # --- Execution 2: player plays from memory ---
+                        engine.load_scene(scene_id, scene_info, state_path=clip_state)
+                        exec2 = execute_gameplay_with_tracking(
+                            win, input_handler, engine, seq_display,
+                            action_seq, preview_exit_x,
+                            speed_factor=SPEED_FACTOR,
+                        )
+                        if exec2 is None:
+                            return
+
+                        points = _compute_points_gameplay(exec2, mt_threshold)
+                        block_points += points
+
+                        logger.log_execution(
+                            block_number=block_num,
+                            trial_number=trial_counter,
+                            scene_id=scene_id,
+                            mode=mode,
+                            execution_number=2,
+                            outcome=exec2["outcome"],
+                            traversal_time=exec2["traversal_time"],
+                            distance_reached=exec2["distance_reached"],
+                            target_sequence=exec2["target_sequence"],
+                            response_sequence=exec2["response_sequence"],
+                            accuracy_per_element=exec2["accuracy_per_element"],
+                            accuracy_trial=exec2["accuracy_trial"],
+                            points_awarded=points,
+                            advanced_mode=_adv,
+                            source_bk2=_adv_bk2,
+                            repeat_attempt=repeat_attempt,
+                        )
+
+                        # Track block stats
+                        if exec2["outcome"] != "completed":
+                            block_errors += 1
+                        if exec2["outcome"] == "completed":
+                            block_mts.append(exec2["traversal_time"])
+
+                        # Check pass criterion for repeat mode
+                        passed = exec2["outcome"] == "completed"
+
+                    # If not in repeat mode, always break after one attempt
+                    if not _repeat:
+                        passed = True
 
                 # Show points feedback
                 show_trial_points(win, points, FEEDBACK_DURATION)

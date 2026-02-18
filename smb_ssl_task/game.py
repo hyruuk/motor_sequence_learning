@@ -194,6 +194,9 @@ class GameEngine:
         self._renderer = _GLTextureRenderer(win, (display_w, display_h))
         self._renderer.update(first_obs)
         self._current_info = {}
+        # Death detection state (reset on each load_scene)
+        self._prev_player_state = 0
+        self._prev_lives = 0
 
     def load_scene(self, scene_id, scene_info, state_path=None):
         """Load a savestate for a scene and reset the environment.
@@ -230,7 +233,10 @@ class GameEngine:
         self.env.initial_state = state_data
         obs, _info = self.env.reset()
         self._renderer.update(obs)
-        self._current_info = {}
+        self._current_info = _info
+        # Reset death detection state from the fresh reset info
+        self._prev_player_state = _info.get("player_state", 0)
+        self._prev_lives = _info.get("lives", 0)
 
     def step(self, nes_buttons):
         """Advance the game by one frame.
@@ -245,6 +251,8 @@ class GameEngine:
         dict
             Info dict from the environment.
         """
+        self._prev_player_state = self._current_info.get("player_state", 0)
+        self._prev_lives = self._current_info.get("lives", 0)
         obs, reward, done, truncated, info = self.env.step(nes_buttons)
         self._renderer.update(obs)
         self._current_info = info
@@ -273,11 +281,23 @@ class GameEngine:
         return player_x >= scene_info["exit"]
 
     def is_death(self, info=None):
-        """Check if player has died (player_state == 11 or lives decreased)."""
+        """Check if player has died.
+
+        Detects two kinds of death (matching mario.scenes logic):
+        - Enemy / timeout: ``player_state`` transitions to 11.
+        - Fall: ``lives`` decrease without the dying animation.
+        """
         if info is None:
             info = self._current_info
-        player_state = info.get("playerState", 0)
-        return player_state == 11
+        player_state = info.get("player_state", 0)
+        lives = info.get("lives", 0)
+        # Dying animation transition
+        if player_state == 11 and self._prev_player_state != 11:
+            return True
+        # Fall death (lives decrease without player_state 11)
+        if lives < self._prev_lives:
+            return True
+        return False
 
     def close(self):
         """Close the retro environment and free GL resources."""
@@ -288,7 +308,8 @@ class GameEngine:
 
 
 def execute_gameplay_trial(win, input_handler, engine, scene_info,
-                           max_duration=GAMEPLAY_MAX_DURATION):
+                           max_duration=GAMEPLAY_MAX_DURATION,
+                           speed_factor=1.0):
     """Run one gameplay execution of a scene.
 
     Parameters
@@ -300,6 +321,8 @@ def execute_gameplay_trial(win, input_handler, engine, scene_info,
         Scene dict with id, entry, exit, layout.
     max_duration : float
         Maximum seconds before timeout.
+    speed_factor : float
+        Emulator speed multiplier (1.0 = real-time, 0.5 = half speed).
 
     Returns
     -------
@@ -310,6 +333,7 @@ def execute_gameplay_trial(win, input_handler, engine, scene_info,
         - distance_reached: float (fraction of scene traversed)
     """
     scene_length = scene_info["exit"] - scene_info["entry"]
+    scaled_interval = _FRAME_INTERVAL / speed_factor
 
     input_handler.clear()
     start_time = core.getTime()
@@ -334,11 +358,11 @@ def execute_gameplay_trial(win, input_handler, engine, scene_info,
         if input_handler.check_escape():
             return None
 
-        # Step the emulator at 60fps; on faster displays, re-render last frame
+        # Step the emulator; on faster displays, re-render last frame
         if now >= next_step_time:
             action = input_handler.get_action_array()
             info = engine.step(action)
-            next_step_time += _FRAME_INTERVAL
+            next_step_time += scaled_interval
 
             # Check completion
             if engine.is_scene_complete(scene_info, info):
@@ -366,7 +390,7 @@ def execute_gameplay_trial(win, input_handler, engine, scene_info,
 
 
 def execute_gameplay_scan_trial(win, input_handler, engine, scene_info,
-                                duration):
+                                duration, speed_factor=1.0):
     """Fixed-time gameplay execution for scan sessions.
 
     Parameters
@@ -377,12 +401,15 @@ def execute_gameplay_scan_trial(win, input_handler, engine, scene_info,
     scene_info : dict
     duration : float
         Fixed execution window in seconds.
+    speed_factor : float
+        Emulator speed multiplier (1.0 = real-time, 0.5 = half speed).
 
     Returns
     -------
     dict or None
     """
     scene_length = scene_info["exit"] - scene_info["entry"]
+    scaled_interval = _FRAME_INTERVAL / speed_factor
 
     input_handler.clear()
     start_time = core.getTime()
@@ -400,11 +427,11 @@ def execute_gameplay_scan_trial(win, input_handler, engine, scene_info,
         if input_handler.check_escape():
             return None
 
-        # Step emulator at 60fps while game is active
+        # Step emulator while game is active
         if game_active and now >= next_step_time:
             action = input_handler.get_action_array()
             info = engine.step(action)
-            next_step_time += _FRAME_INTERVAL
+            next_step_time += scaled_interval
 
             if engine.is_scene_complete(scene_info, info):
                 outcome = "completed"
@@ -462,7 +489,7 @@ def _symbol_to_action_array(symbol):
 
 
 def replay_bk2_preview(win, input_handler, engine, seq_display,
-                       action_sequence):
+                       action_sequence, speed_factor=1.0):
     """Replay the compressed action sequence through the emulator.
 
     The bar fills green progressively as the emulator replays the scene.
@@ -477,6 +504,8 @@ def replay_bk2_preview(win, input_handler, engine, seq_display,
     seq_display : ActionSequenceDisplay
     action_sequence : list[tuple[str, int]]
         Compressed action sequence: (symbol, duration_frames) tuples.
+    speed_factor : float
+        Playback speed multiplier (1.0 = real-time, 0.5 = half speed).
 
     Returns
     -------
@@ -485,46 +514,58 @@ def replay_bk2_preview(win, input_handler, engine, seq_display,
     """
     seq_display.show(action_sequence)
 
-    total_frames = sum(frames for _, frames in action_sequence)
-    global_frame = 0
-
+    # Build a flat schedule: for each frame, its action and element index
+    frame_schedule = []
     for elem_idx, (symbol, duration_frames) in enumerate(action_sequence):
         action = _symbol_to_action_array(symbol)
-
         for f in range(duration_frames):
-            if input_handler.check_escape():
-                return None
+            frame_schedule.append((elem_idx, action, f, duration_frames))
 
+    total_frames = len(frame_schedule)
+    frame_idx = 0
+    scaled_interval = _FRAME_INTERVAL / speed_factor
+
+    start_time = core.getTime()
+    next_step_time = start_time
+
+    while frame_idx < total_frames:
+        if input_handler.check_escape():
+            return None
+
+        now = core.getTime()
+
+        # Step emulator frames that are due
+        if now >= next_step_time:
+            elem_idx, action, f, duration_frames = frame_schedule[frame_idx]
             engine.step(action)
-            global_frame += 1
+            frame_idx += 1
+            next_step_time += scaled_interval
 
             # Update bar fill for current element
             frac = (f + 1) / duration_frames
             seq_display.update_bar_fill(elem_idx, frac, color=ACTION_COLOR_CORRECT)
 
             # Mark all previous elements as fully filled
-            # (only needed on first frame of each new element)
             if f == 0 and elem_idx > 0:
                 for prev in range(elem_idx):
                     seq_display.update_bar_fill(prev, 1.0, color=ACTION_COLOR_CORRECT)
 
-            engine.render()
-            seq_display.draw()
-            win.flip()
-
-            # Pace at 60fps
-            if global_frame < total_frames:
-                core.wait(_FRAME_INTERVAL, hogCPUperiod=_FRAME_INTERVAL)
+        # Always render + flip at display refresh rate
+        engine.render()
+        seq_display.draw()
+        win.flip()
 
     exit_x = engine.get_player_x()
     if verbose():
-        print(f"  [PREVIEW] Completed. exit_x={exit_x}, total_frames={total_frames}")
+        print(f"  [PREVIEW] Completed. exit_x={exit_x}, total_frames={total_frames}, "
+              f"speed={speed_factor:.2f}x")
     return {"exit_x": exit_x}
 
 
 def execute_gameplay_with_tracking(win, input_handler, engine, seq_display,
                                    action_sequence, exit_x,
-                                   max_duration=GAMEPLAY_MAX_DURATION):
+                                   max_duration=GAMEPLAY_MAX_DURATION,
+                                   speed_factor=1.0):
     """Run one player gameplay execution with real-time sequence tracking.
 
     The bar fills green/red based on whether the player's input matches
@@ -542,6 +583,8 @@ def execute_gameplay_with_tracking(win, input_handler, engine, seq_display,
         Player x-position at which to end (from preview replay).
     max_duration : float
         Maximum seconds before timeout.
+    speed_factor : float
+        Emulator speed multiplier (1.0 = real-time, 0.5 = half speed).
 
     Returns
     -------
@@ -551,6 +594,7 @@ def execute_gameplay_with_tracking(win, input_handler, engine, seq_display,
     n_elements = len(action_sequence)
     target_symbols = [s for s, _ in action_sequence]
     durations_frames = [frames for _, frames in action_sequence]
+    scaled_interval = _FRAME_INTERVAL / speed_factor
 
     # Cumulative frame boundaries: cum[i] = first frame of element i
     cum = [0]
@@ -582,11 +626,11 @@ def execute_gameplay_with_tracking(win, input_handler, engine, seq_display,
         if input_handler.check_escape():
             return None
 
-        # Step emulator at 60fps
+        # Step emulator
         if now >= next_step_time:
             action = input_handler.get_action_array()
             info = engine.step(action)
-            next_step_time += _FRAME_INTERVAL
+            next_step_time += scaled_interval
             frame_counter += 1
 
             # Determine current target element from frame counter
@@ -602,7 +646,7 @@ def execute_gameplay_with_tracking(win, input_handler, engine, seq_display,
 
             # Accumulate chord time for current element
             if ei < n_elements:
-                elem_chord_times[ei][frozenset(relevant)] += _FRAME_INTERVAL
+                elem_chord_times[ei][frozenset(relevant)] += scaled_interval
 
             # Determine bar colour based on input match
             target_btns = SYMBOL_TO_BUTTONS.get(target_symbols[ei], set())

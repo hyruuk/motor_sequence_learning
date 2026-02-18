@@ -2,6 +2,8 @@
 Configuration parameters for the SMB Scene Sequence Learning (SSL) task.
 """
 
+import sys
+
 # --- Paths ---
 GAME_NAME = "SuperMarioBros-Nes"
 SETTINGS_FILE = ".smb_ssl_settings.json"  # Persistent settings (next to data/)
@@ -90,6 +92,7 @@ COUNTDOWN_STEPS = ["3", "2", "1", "GO"]
 COUNTDOWN_STEP_DURATION = 0.75  # seconds per countdown step
 GAMEPLAY_BAR_Y_BASE = -300      # y position for overlay bar in gameplay mode
 GAMEPLAY_BAR_FONT_SIZE = 28     # smaller font for gameplay overlay
+SPEED_FACTOR = 1.0              # playback speed multiplier (1.0 = real-time)
 
 # --- Training parameters ---
 TRAINING_TRIALS_PER_BLOCK = 24  # 6 scenes x 4 reps
@@ -159,3 +162,35 @@ def set_verbose(v):
 def verbose():
     """Return True if verbose mode is enabled (--verbose / -v)."""
     return _verbose
+
+
+def apply_overrides(overrides):
+    """Patch config constants and propagate to already-imported submodules.
+
+    Because task modules use ``from smb_ssl_task.config import CONSTANT``
+    (which copies the value at import time), simply setting
+    ``config.CONSTANT = new_value`` won't reach them.  This function
+    patches both the config module itself **and** every already-loaded
+    ``smb_ssl_task.*`` submodule that has an attribute with the same name.
+
+    Parameters
+    ----------
+    overrides : dict
+        Mapping of ``{CONFIG_CONSTANT_NAME: new_value}``.  Only keys that
+        actually exist on this module are applied; unknown keys are silently
+        ignored.
+    """
+    config_mod = sys.modules[__name__]
+    for key, value in overrides.items():
+        if not hasattr(config_mod, key):
+            continue
+        setattr(config_mod, key, value)
+        # Propagate to every smb_ssl_task.* module that already imported it
+        for mod_name, mod in list(sys.modules.items()):
+            if (
+                mod is not None
+                and mod_name.startswith("smb_ssl_task.")
+                and mod_name != __name__
+                and hasattr(mod, key)
+            ):
+                setattr(mod, key, value)

@@ -5,9 +5,11 @@ Scene definitions, BK2 parsing, and action vocabulary for the SMB SSL task.
 Action sequences are dynamically extracted from random BK2 replay clips at runtime.
 """
 
+import csv
 import json
 import os
 import random
+import re
 import zipfile
 
 from smb_ssl_task.config import (
@@ -25,6 +27,8 @@ from smb_ssl_task.config import (
 _scenes_path = None
 # Tracks the last source BK2 used per scene (updated on each extraction)
 _last_source = {}
+# Cached mastersheet data: {scene_id: scene_dict}
+_mastersheet_cache = None
 
 
 def set_scenes_path(path):
@@ -338,6 +342,110 @@ def get_clip_savestate_path(scene_id):
 def get_pretrain_scenes():
     """Return list of pretrain scene dicts (not in experimental set)."""
     return list(PRETRAIN_SCENES)
+
+
+# ---------------------------------------------------------------------------
+# Mastersheet loading and scene lookup helpers
+# ---------------------------------------------------------------------------
+
+def load_mastersheet(scenes_path=None):
+    """Parse the mastersheet CSV and return {scene_id: scene_dict}.
+
+    Each scene_dict has keys: id, world, level, scene, entry, exit, layout.
+    Cached at module level after first call.
+    """
+    global _mastersheet_cache
+    if _mastersheet_cache is not None:
+        return _mastersheet_cache
+
+    if scenes_path is None:
+        scenes_path = _scenes_path
+    if not scenes_path:
+        return {}
+
+    csv_path = os.path.join(
+        scenes_path, "sourcedata", "scenes_info", "scenes_mastersheet.csv"
+    )
+    if not os.path.isfile(csv_path):
+        return {}
+
+    result = {}
+    with open(csv_path, newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if not row.get("World") or not row["World"].strip():
+                continue
+            w = int(row["World"])
+            l = int(row["Level"])
+            s = int(row["Scene"])
+            scene_id = f"w{w}l{l}s{s}"
+            result[scene_id] = {
+                "id": scene_id,
+                "world": w,
+                "level": l,
+                "scene": s,
+                "entry": int(row["Entry point"]),
+                "exit": int(row["Exit point"]),
+                "layout": int(row["Layout"]),
+            }
+
+    _mastersheet_cache = result
+    return _mastersheet_cache
+
+
+def get_scene_info_any(scene_id, scenes_path=None):
+    """Look up scene info from any source: ALL_SCENES, pretrain, or mastersheet.
+
+    Returns a scene_dict or None if not found anywhere.
+    """
+    if scene_id in ALL_SCENES:
+        return ALL_SCENES[scene_id]
+
+    pretrain_dict = {s["id"]: s for s in PRETRAIN_SCENES}
+    if scene_id in pretrain_dict:
+        return pretrain_dict[scene_id]
+
+    ms = load_mastersheet(scenes_path)
+    return ms.get(scene_id)
+
+
+def _scene_id_from_filename(filename):
+    """Parse a BK2 filename to extract scene_id.
+
+    Expects patterns like ``_level-w1l1_scene-3_clip-`` in the filename.
+    Returns e.g. ``"w1l1s3"`` or None if parsing fails.
+    """
+    m = re.search(r"_level-(w\d+l\d+)_scene-(\d+)_clip-", filename)
+    if m:
+        return f"{m.group(1)}s{m.group(2)}"
+    return None
+
+
+def get_canonical_sequence_from_bk2(bk2_path):
+    """Extract an action sequence from a specific BK2 file.
+
+    Like ``get_canonical_sequence`` but deterministic — uses the given BK2
+    without random selection. Updates ``_last_source`` for the scene.
+
+    Returns the filtered sequence or raises ValueError if extraction fails.
+    """
+    global _last_source
+
+    scene_id = _scene_id_from_filename(os.path.basename(bk2_path))
+
+    seq = extract_action_sequence(bk2_path)
+    if not seq:
+        raise ValueError(f"No action data extracted from {bk2_path}")
+
+    # Filter out idle '_' elements
+    seq = [(sym, dur) for sym, dur in seq if sym != "_"]
+    if not seq:
+        raise ValueError(f"Sequence is empty after filtering idle frames: {bk2_path}")
+
+    if scene_id:
+        _last_source[scene_id] = bk2_path
+
+    return seq
 
 
 def get_savestate_path(scene_id, participant="01", session="001",

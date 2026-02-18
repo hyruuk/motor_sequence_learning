@@ -16,6 +16,7 @@ import traceback
 
 from psychopy import visual, gui, core, event
 
+from smb_ssl_task import config
 from smb_ssl_task.config import (
     FULLSCREEN,
     MONITOR_NAME,
@@ -24,6 +25,7 @@ from smb_ssl_task.config import (
     GAME_NAME,
     set_verbose,
 )
+from smb_ssl_task.advanced_gui import AdvancedConfig
 from smb_ssl_task.scenes import set_scenes_path
 
 
@@ -129,6 +131,7 @@ def main():
         "Screen resolution": default_resolution,
         "Scenes dataset dir": settings.get("scenes_dataset_dir", ""),
         "Retro integration dir": settings.get("retro_integration_dir", ""),
+        "Advanced mode": settings.get("advanced_mode", False),
     }
 
     dlg = gui.DlgFromDict(
@@ -144,6 +147,7 @@ def main():
             "Screen resolution",
             "Scenes dataset dir",
             "Retro integration dir",
+            "Advanced mode",
         ],
         tip={
             "Screen resolution": (
@@ -158,6 +162,10 @@ def main():
             "Retro integration dir": (
                 "Directory containing SuperMarioBros-Nes/ "
                 "(with rom.nes, data.json, etc.) — gameplay mode only"
+            ),
+            "Advanced mode": (
+                "Open filter dialogs to pick a specific BK2 clip "
+                "and optionally repeat until passed"
             ),
         },
     )
@@ -182,12 +190,27 @@ def main():
     except (ValueError, AttributeError):
         screen_size = (1920, 1080)
 
+    advanced_mode_checked = bool(info["Advanced mode"])
+
     # --- Save settings for next run ---
     settings["participant_id"] = participant_id
     settings["screen_resolution"] = resolution_str
     settings["scenes_dataset_dir"] = scenes_dataset_dir
     settings["retro_integration_dir"] = retro_integration_dir
+    settings["advanced_mode"] = advanced_mode_checked
     _save_settings(settings)
+
+    # --- Advanced mode dialogs ---
+    advanced_config = AdvancedConfig(enabled=False)
+    if advanced_mode_checked:
+        from smb_ssl_task.advanced_gui import run_advanced_dialogs
+        advanced_config = run_advanced_dialogs(scenes_dataset_dir)
+
+    # --- Apply config overrides from advanced dialog ---
+    if advanced_config.enabled:
+        overrides = advanced_config.get_config_overrides()
+        if overrides:
+            config.apply_overrides(overrides)
 
     # --- Set scenes dataset path (needed by both MSP and gameplay modes) ---
     if scenes_dataset_dir and os.path.isdir(scenes_dataset_dir):
@@ -263,6 +286,7 @@ def main():
                 n_blocks=n_blocks_or_reps,
                 mode=mode,
                 engine=engine,
+                advanced_config=advanced_config,
             )
         elif session_type == "test":
             run_test_session(
@@ -274,6 +298,7 @@ def main():
                 n_reps_per_scene=n_blocks_or_reps,
                 mode=mode,
                 engine=engine,
+                advanced_config=advanced_config,
             )
         elif session_type == "scan_paced":
             run_scan_session(
@@ -285,6 +310,7 @@ def main():
                 paced=True,
                 mode=mode,
                 engine=engine,
+                advanced_config=advanced_config,
             )
         elif session_type == "scan_fullspeed":
             run_scan_session(
@@ -296,6 +322,7 @@ def main():
                 paced=False,
                 mode=mode,
                 engine=engine,
+                advanced_config=advanced_config,
             )
         elif session_type == "pretrain":
             run_pretrain_session(
@@ -306,6 +333,7 @@ def main():
                 session_number=session_number,
                 mode=mode,
                 engine=engine,
+                advanced_config=advanced_config,
             )
         else:
             raise ValueError(f"Unknown session type: {session_type}")

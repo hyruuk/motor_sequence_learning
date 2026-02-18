@@ -36,6 +36,10 @@ COLUMNS = [
     "distance_reached",
     # Shared
     "points_awarded",
+    # Advanced mode
+    "advanced_mode",
+    "source_bk2",
+    "repeat_attempt",
 ]
 
 
@@ -100,6 +104,10 @@ class DataLogger:
         distance_reached=None,
         # Shared
         points_awarded=0,
+        # Advanced mode
+        advanced_mode=False,
+        source_bk2=None,
+        repeat_attempt=1,
     ):
         """Append one row (one execution) to the TSV file."""
         row = [
@@ -129,6 +137,10 @@ class DataLogger:
             f"{distance_reached:.4f}" if distance_reached is not None else "NA",
             # Shared
             str(points_awarded),
+            # Advanced mode
+            str(advanced_mode),
+            str(source_bk2) if source_bk2 else "NA",
+            str(repeat_attempt),
         ]
         self._file.write(TSV_SEPARATOR.join(row) + "\n")
         self._file.flush()
